@@ -1,54 +1,25 @@
-
-/******************************************************************************
- *
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
  * Copyright (C) 2007-2009 Steven Rostedt <srostedt@redhat.com>
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License (not later!)
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
- * NAME
- *      rt-migrate-test.c
- *
- * DESCRIPTION
- *	This test makes sure that all the high prio tasks that are in the
- *	running state are actually running on a CPU if it can.
- ** Steps:
- *	- Creates N+1 threads with lower real time priorities.
- *	  Where N is the number of CPUs in the system.
- *	- If the thread is high priority, and if a CPU is available, the
- *	  thread runs on that CPU.
- *	- The thread records the start time and the number of ticks in the run
- *	  interval.
- *	- The output indicates if lower prio task is quicker than higher
- *	  priority task.
- *
- * USAGE:
- *	Use run_auto.sh in the current directory to build and run the test.
- *
- * AUTHOR
- *      Steven Rostedt <srostedt@redhat.com>
- *
- * HISTORY
- *      30 July, 2009: Initial version by Steven Rostedt
- *      11 Aug, 2009: Converted the coding style to the one used by the realtime
- *		    testcases by Kiran Prakash
- *
+ * Copyright (c) 2023 Marius Kittler <mkittler@suse.de>
  */
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
+
+/*\
+ * [Description]
+ *
+ * This test makes sure that all the high prio tasks that are in the
+ * running state are actually running on a CPU if it can.
+ * Steps:
+ * - Creates N+1 threads with lower real time priorities.
+ *   Where N is the number of CPUs in the system.
+ * - If the thread is high priority, and if a CPU is available, the
+ *   thread runs on that CPU.
+ * - The thread records the start time and the number of ticks in the run
+ *   interval.
+ * - The output indicates if lower prio task is quicker than higher
+ *   priority task.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,12 +38,26 @@
 #include <errno.h>
 #include <sched.h>
 #include <pthread.h>
+
+#define TST_NO_DEFAULT_MAIN /* parse options via librttest */
+#include "tst_test.h"
+#include "tst_safe_pthread.h"
+
+/* prevent definitions from config headers of test library and
+ * realtime library from clashing */
+#undef PACKAGE
+#undef PACKAGE_BUGREPORT
+#undef PACKAGE_NAME
+#undef PACKAGE_STRING
+#undef PACKAGE_TARNAME
+#undef PACKAGE_URL
+#undef PACKAGE_VERSION
+#undef VERSION
+
 #include <librttest.h>
 #include <libstats.h>
 
 #define gettid() syscall(__NR_gettid)
-
-#define VERSION_STRING "V 0.4LTP"
 
 #define CLAMP(x, lower, upper) (MIN(upper, MAX(x, lower)))
 #define CLAMP_PRIO(prio) CLAMP(prio, prio_min, prio_max)
@@ -80,7 +65,6 @@
 int nr_tasks;
 int lfd;
 
-int numcpus;
 static int mark_fd = -1;
 static __thread char buff[BUFSIZ + 1];
 
@@ -93,7 +77,7 @@ static void setup_ftrace_marker(void)
 		"/debugfs/tracing/trace_marker",
 	};
 	int ret;
-	int i;
+	unsigned int i;
 
 	for (i = 0; i < (sizeof(files) / sizeof(char *)); i++) {
 		ret = stat(files[i], &st);
@@ -138,7 +122,7 @@ static void ftrace_write(const char *fmt, ...)
 
 static unsigned long long interval = INTERVAL;
 static unsigned long long run_interval = RUN_INTERVAL;
-static unsigned long long max_err = MAX_ERR;
+static long max_err = MAX_ERR;
 static int nr_runs = NR_RUNS;
 static int prio_start = PRIO_START, prio_min, prio_max;
 static int check = 1;
@@ -181,7 +165,7 @@ static void print_progress_bar(int percent)
 	fflush(stderr);
 }
 
-static void usage()
+static void usage(void)
 {
 	rt_help();
 	printf("Usage:\n"
@@ -243,7 +227,7 @@ static void record_time(int id, unsigned long long time, unsigned long l)
 	stats_container_append(&intervals_loops[id], rec);
 }
 
-static void print_results(void)
+static void print_details(void)
 {
 	int i;
 	int t;
@@ -295,8 +279,6 @@ static void print_results(void)
 		printf("   Avg: %lld us\n", tasks_avg[t]);
 		printf("\n");
 	}
-
-	printf(" Result: %s\n", (check < 0) ? "FAIL" : "PASS");
 }
 
 static unsigned long busy_loop(unsigned long long start_time)
@@ -346,13 +328,13 @@ void *start_task(void *data)
 			cpu++;
 			sched_setaffinity(0, sizeof(cpumask), &cpumask);
 		}
-		pthread_barrier_wait(&start_barrier);
+		SAFE_PTHREAD_BARRIER_WAIT(&start_barrier);
 		start_time = rt_gettime();
 		ftrace_write("Thread %d: started %lld diff %lld\n",
 			     pid, start_time, start_time - now);
 		l = busy_loop(start_time);
 		record_time(id, start_time / NS_PER_US, l);
-		pthread_barrier_wait(&end_barrier);
+		SAFE_PTHREAD_BARRIER_WAIT(&end_barrier);
 	}
 
 	return (void *)pid;
@@ -361,9 +343,9 @@ void *start_task(void *data)
 static int check_times(int l)
 {
 	int i;
-	unsigned long long last;
-	unsigned long long last_loops;
-	unsigned long long last_length;
+	long last;
+	long last_loops;
+	long last_length;
 
 	for (i = 0; i < nr_tasks; i++) {
 		if (i && last < intervals[i].records[l].y &&
@@ -390,12 +372,12 @@ static int check_times(int l)
 	return 0;
 }
 
-static void stop_log(int sig)
+static void stop_log(LTP_ATTRIBUTE_UNUSED int sig)
 {
-	stop = 1;
+	stop = 0;
 }
 
-int main(int argc, char **argv)
+static void run_test(void)
 {
 	/*
 	 * Determine the valid priority range; subtracting one from the
@@ -406,50 +388,22 @@ int main(int argc, char **argv)
 
 	int *threads;
 	long i;
-	int ret;
 	struct timespec intv;
 	struct sched_param param;
 
-	rt_init("a:r:t:e:l:h:", parse_args, argc, argv);
 	signal(SIGINT, stop_log);
 
-	if (argc >= (optind + 1))
-		nr_tasks = atoi(argv[optind]);
-	else {
-		numcpus = sysconf(_SC_NPROCESSORS_ONLN);
-		nr_tasks = numcpus + 1;
-	}
-	if (nr_tasks < 0) {
-		printf("The number of tasks must not be negative.\n");
-		exit(EXIT_FAILURE);
-	}
-
-	intervals = malloc(sizeof(stats_container_t) * nr_tasks);
-	if (!intervals)
-		debug(DBG_ERR, "malloc failed\n");
+	intervals = SAFE_MALLOC(sizeof(stats_container_t) * nr_tasks);
 	memset(intervals, 0, sizeof(stats_container_t) * nr_tasks);
-
-	intervals_length = malloc(sizeof(stats_container_t) * nr_tasks);
-	if (!intervals_length)
-		debug(DBG_ERR, "malloc failed\n");
+	intervals_length = SAFE_MALLOC(sizeof(stats_container_t) * nr_tasks);
 	memset(intervals_length, 0, sizeof(stats_container_t) * nr_tasks);
-
-	if (!intervals_loops)
-		debug(DBG_ERR, "malloc failed\n");
-	intervals_loops = malloc(sizeof(stats_container_t) * nr_tasks);
+	intervals_loops = SAFE_MALLOC(sizeof(stats_container_t) * nr_tasks);
 	memset(intervals_loops, 0, sizeof(stats_container_t) * nr_tasks);
-
-	threads = malloc(sizeof(*threads) * nr_tasks);
-	if (!threads)
-		debug(DBG_ERR, "malloc failed\n");
+	threads = SAFE_MALLOC(sizeof(*threads) * nr_tasks);
 	memset(threads, 0, sizeof(*threads) * nr_tasks);
 
-	ret = pthread_barrier_init(&start_barrier, NULL, nr_tasks + 1);
-	ret = pthread_barrier_init(&end_barrier, NULL, nr_tasks + 1);
-	if (ret < 0)
-		debug(DBG_ERR, "pthread_barrier_init failed: %s\n",
-		      strerror(ret));
-
+	SAFE_PTHREAD_BARRIER_INIT(&start_barrier, NULL, nr_tasks + 1);
+	SAFE_PTHREAD_BARRIER_INIT(&end_barrier, NULL, nr_tasks + 1);
 	for (i = 0; i < nr_tasks; i++) {
 		stats_container_init(&intervals[i], nr_runs);
 		stats_container_init(&intervals_length[i], nr_runs);
@@ -492,7 +446,7 @@ int main(int argc, char **argv)
 
 		ftrace_write("Loop %d now=%lld\n", loop, now);
 
-		pthread_barrier_wait(&start_barrier);
+		SAFE_PTHREAD_BARRIER_WAIT(&start_barrier);
 
 		ftrace_write("All running!!!\n");
 
@@ -502,7 +456,7 @@ int main(int argc, char **argv)
 		end = rt_gettime() / NS_PER_US;
 		ftrace_write("Loop %d end now=%lld diff=%lld\n",
 			     loop, end, end - now);
-		ret = pthread_barrier_wait(&end_barrier);
+		SAFE_PTHREAD_BARRIER_WAIT(&end_barrier);
 
 		if (stop || (check && check_times(loop))) {
 			loop++;
@@ -512,27 +466,31 @@ int main(int argc, char **argv)
 	}
 	putc('\n', stderr);
 
-	pthread_barrier_wait(&start_barrier);
+	SAFE_PTHREAD_BARRIER_WAIT(&start_barrier);
 	done = 1;
-	pthread_barrier_wait(&end_barrier);
+	SAFE_PTHREAD_BARRIER_WAIT(&end_barrier);
 
 	join_threads();
-	print_results();
+	print_details();
+	tst_res(check < 0 ? TFAIL : TPASS,
+			"high prio tasks get more cpu time than low prio tasks");
+}
 
-	if (stop) {
-		/*
-		 * We use this test in bash while loops
-		 * So if we hit Ctrl-C then let the while
-		 * loop know to break.
-		 */
-		if (check < 0)
-			exit(-1);
-		else
-			exit(1);
+static struct tst_test test = {
+	.setup = setup,
+	.test_all = run_test
+};
+
+int main(int argc, char *argv[])
+{
+	rt_init("a:r:t:e:l:h:", parse_args, argc, argv);
+
+	if (argc >= (optind + 1)) {
+		if (tst_parse_int(argv[optind], &nr_tasks, 0, INT_MAX))
+			tst_brk(TBROK, "Invalid number of tasks '%s'", argv[optind]);
+	} else {
+		nr_tasks = tst_ncpus();
 	}
 
-	if (check < 0)
-		exit(-1);
-	else
-		exit(0);
+	tst_run_tcases(0, argv, &test);
 }

@@ -22,6 +22,8 @@
 
 top_srcdir		?= ../../../..
 
+include $(top_srcdir)/include/mk/testcases.mk
+
 INSTALL_TARGETS		:= run_auto.sh
 include $(top_srcdir)/include/mk/env_pre.mk
 include $(abs_srcdir)/../../config.mk
